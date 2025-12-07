@@ -389,6 +389,180 @@ app.post('/interact', async (req, res) => {
   }
 });
 
+// Lưu cookies và storage state
+app.post('/save-session', async (req, res) => {
+  const { url, sessionName, actions = [] } = req.body;
+  
+  if (!url || !sessionName) {
+    return res.status(400).json({ error: 'URL and sessionName are required' });
+  }
+
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: false, // Để user login thủ công
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    
+    await page.goto(url, { waitUntil: 'networkidle' });
+    
+    // Thực hiện các actions nếu có (như click login button)
+    for (const action of actions) {
+      const { type, selector, value } = action;
+      if (type === 'click') await page.click(selector);
+      if (type === 'fill') await page.fill(selector, value);
+      if (type === 'wait') await page.waitForTimeout(parseInt(value) || 5000);
+    }
+    
+    // Đợi user login thủ công
+    console.log('Waiting for manual login... (60 seconds)');
+    await page.waitForTimeout(60000);
+    
+    // Lưu storage state
+    const storageState = await context.storageState();
+    
+    // Lưu vào file hoặc database (tạm thời dùng in-memory)
+    // Trong production, nên lưu vào Redis hoặc database
+    global.sessions = global.sessions || {};
+    global.sessions[sessionName] = storageState;
+    
+    await browser.close();
+    
+    res.json({ 
+      success: true, 
+      message: `Session '${sessionName}' saved successfully`,
+      sessionName
+    });
+    
+  } catch (error) {
+    if (browser) await browser.close();
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Sử dụng session đã lưu
+app.post('/use-session', async (req, res) => {
+  const { sessionName, url, actions = [], extractText = false } = req.body;
+  
+  if (!sessionName || !url) {
+    return res.status(400).json({ error: 'sessionName and URL are required' });
+  }
+
+  // Lấy session đã lưu
+  const storageState = global.sessions?.[sessionName];
+  if (!storageState) {
+    return res.status(404).json({ error: `Session '${sessionName}' not found` });
+  }
+
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    
+    // Tạo context với storage state đã lưu
+    const context = await browser.newContext({ storageState });
+    const page = await context.newPage();
+    
+    await page.goto(url, { waitUntil: 'networkidle' });
+    
+    const results = [];
+    
+    // Thực hiện actions
+    for (const action of actions) {
+      const { type, selector, value, options = {} } = action;
+      
+      try {
+        switch (type) {
+          case 'fill':
+            await page.fill(selector, value);
+            results.push({ action: 'fill', selector, success: true });
+            break;
+            
+          case 'click':
+            await page.click(selector);
+            results.push({ action: 'click', selector, success: true });
+            break;
+            
+          case 'press':
+            await page.press(selector, value);
+            results.push({ action: 'press', key: value, success: true });
+            break;
+            
+          case 'wait':
+            if (selector) {
+              await page.waitForSelector(selector, { timeout: options.timeout || 30000 });
+            } else {
+              await page.waitForTimeout(parseInt(value) || 1000);
+            }
+            results.push({ action: 'wait', success: true });
+            break;
+            
+          case 'getText':
+            const text = await page.textContent(selector);
+            results.push({ action: 'getText', selector, text, success: true });
+            break;
+            
+          case 'evaluate':
+            const evalResult = await page.evaluate(value);
+            results.push({ action: 'evaluate', result: evalResult, success: true });
+            break;
+        }
+        
+        await page.waitForTimeout(options.delay || 200);
+        
+      } catch (error) {
+        results.push({ action: type, error: error.message, success: false });
+      }
+    }
+    
+    let extractedText = null;
+    if (extractText && extractText.selector) {
+      try {
+        extractedText = await page.textContent(extractText.selector);
+      } catch (e) {
+        extractedText = null;
+      }
+    }
+    
+    await browser.close();
+    
+    res.json({ 
+      success: true,
+      data: {
+        results,
+        extractedText,
+        url: page.url()
+      }
+    });
+    
+  } catch (error) {
+    if (browser) await browser.close();
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// List sessions
+app.get('/sessions', (req, res) => {
+  const sessions = Object.keys(global.sessions || {});
+  res.json({ sessions });
+});
+
+// Delete session
+app.delete('/session/:name', (req, res) => {
+  const { name } = req.params;
+  if (global.sessions?.[name]) {
+    delete global.sessions[name];
+    res.json({ success: true, message: `Session '${name}' deleted` });
+  } else {
+    res.status(404).json({ error: 'Session not found' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Playwright service running on port ${PORT}`);
 });

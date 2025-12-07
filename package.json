@@ -1,0 +1,17 @@
+{
+  "name": "playwright-service",
+  "version": "1.0.0",
+  "description": "Playwright API service for n8n",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": ["playwright", "scraping", "automation"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.2.1",
+    "playwright": "^1.57.0"
+  }
+}
